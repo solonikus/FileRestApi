@@ -11,9 +11,9 @@ import (
 )
 
 type Files struct {
-	id   int    `json:"id"`
-	name string `json:"name"`
-	size int    `json:"size"`
+	Id   int    `json:"Id"`
+	Name string `json:"Name"`
+	Size int    `json:"Size"`
 }
 
 var (
@@ -39,9 +39,9 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
         <h2>Upload a File</h2>
         <form action="/files" method="post" enctype="multipart/form-data">
             <label for="description">Description:</label>
-            <input type="text" name="description" id="description"><br><br>
+            <input type="text" Name="description" Id="description"><br><br>
             <label for="uploadFile">Choose file:</label>
-            <input type="file" name="uploadFile" id="uploadFile"><br><br>
+            <input type="file" Name="uploadFile" Id="uploadFile"><br><br>
             <input type="submit" value="Upload">
         </form>
     </body>
@@ -56,6 +56,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Привет, я последний хэндлер!"))
 }
 
+// Загрузка файла
 func postFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -87,8 +88,15 @@ func postFile(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "File %s uploaded successfully!", f_handler.Filename)
 }
 
+// список файлов
 func getFile(w http.ResponseWriter, r *http.Request) {
-
+	fileListJson, err := json.Marshal(db_files)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	//fmt.Fprintf(w, string(file_list_json))
+	w.Write(fileListJson)
 }
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
@@ -131,18 +139,21 @@ func checkFilesInFolder() {
 		return
 	}
 	for _, file := range files {
-		if file.Name() == db_json {
+		if file.Name() == "db.json" {
 			continue
 		}
 		if !thisFileInDB(file.Name()) {
-			os.Remove(file.Name())
+			err := os.Remove("./upload/" + file.Name())
+			if err != nil {
+				fmt.Println(err)
+			}
 		}
 	}
 }
 
 func thisFileInDB(filename string) bool {
 	for _, file := range db_files {
-		if file.name == filename {
+		if file.Name == filename {
 			return true
 		}
 	}
@@ -151,7 +162,7 @@ func thisFileInDB(filename string) bool {
 
 func getLastID() {
 	for i := 0; i < len(db_files); i++ {
-		db_last_id = max(db_last_id, db_files[i].id)
+		db_last_id = max(db_last_id, db_files[i].Id)
 	}
 }
 
@@ -165,14 +176,14 @@ func checkDeletedFiles() {
 	copy(db_files_copy, db_files)
 	for i, file := range db_files_copy {
 		if noFileInFolder(file, files) {
-			db_files = slices.Delete(db_files, i, i+1)
+			db_files = slices.Delete(db_files, i, i+1) //потенциальный баг, проверить
 		}
 	}
 }
 
 func noFileInFolder(file_db Files, files []os.DirEntry) bool {
 	for _, file := range files {
-		if file_db.name == file.Name() {
+		if file_db.Name == file.Name() {
 			return false
 		}
 	}
