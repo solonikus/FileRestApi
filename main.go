@@ -5,9 +5,14 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 type Files struct {
@@ -26,7 +31,7 @@ func addFileInDB(file Files) {
 	db_files = append(db_files, file)
 }
 
-func indexHandler(w http.ResponseWriter, r *http.Request) {
+func indexHandler(c *gin.Context) {
 	// Отдаём HTML-форму
 	tmpl := `
     <!DOCTYPE html>
@@ -47,8 +52,8 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     </body>
     </html>
     `
-	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprint(w, tmpl)
+	c.Header("Content-Type", "text/html")
+	c.Writer.Write([]byte(tmpl))
 }
 
 // Обработчик HTTP-запросов
@@ -57,56 +62,64 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Загрузка файла
-func postFile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+func postFile(c *gin.Context) {
+	err := c.Request.ParseMultipartForm(10 << 20)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	err := r.ParseMultipartForm(10 << 20)
+	file, f_handler, err := c.Request.FormFile("uploadFile")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	file, f_handler, err := r.FormFile("uploadFile")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer file.Close()
 	out_file, err := os.Create("./upload/" + f_handler.Filename)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer out_file.Close()
 	_, err = io.Copy(out_file, file)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	addFileInDB(Files{db_last_id + 1, f_handler.Filename, int(f_handler.Size)})
-	fmt.Fprintf(w, "File %s uploaded successfully!", f_handler.Filename)
+
+	// Возвращаем успешный ответ
+	c.JSON(http.StatusOK, gin.H{
+		"message": "File " + f_handler.Filename + " uploaded successfully!",
+	})
 }
 
 // список файлов
-func getFile(w http.ResponseWriter, r *http.Request) {
-	fileListJson, err := json.Marshal(db_files)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	//fmt.Fprintf(w, string(file_list_json))
-	w.Write(fileListJson)
+func getFile(c *gin.Context) {
+	c.JSON(200, db_files)
 }
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		getFile(w, r)
-	} else if r.Method == "POST" {
-		postFile(w, r)
-	} else {
-		http.Error(w, "Wrong method", http.StatusMethodNotAllowed)
+func getMetaData(id int) string {
+	for _, file := range db_files {
+		if file.Id != id {
+			continue
+		}
+		str := "Filename:" + file.Name + "\nSize:" + strconv.Itoa(file.Size) + "bytes"
+		return str
 	}
+	return "Not found"
+}
+
+// Данные файла
+func getIdFile(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ID must be number": err.Error()})
+	}
+	str := getMetaData(id)
+	c.JSON(http.StatusOK, gin.H{
+		"message": str,
+	})
 }
 
 func middleware(next http.HandlerFunc) http.HandlerFunc {
@@ -114,11 +127,20 @@ func middleware(next http.HandlerFunc) http.HandlerFunc {
 		path := r.URL.Path
 		fmt.Fprintf(w, "Путь: %s\n", path)
 
-		if path != "/files" {
-			http.Error(w, "404 not found", http.StatusNotFound)
+		if path == "/files" {
+			next(w, r)
+		} else {
+			http.NotFound(w, r)
 		}
+	}
+}
 
-		next(w, r)
+func loggingMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next() // Вызываем следующий обработчик
+		duration := time.Since(start)
+		log.Printf("Запрос: %s %s, время выполнения: %v", c.Request.Method, c.Request.URL.Path, duration)
 	}
 }
 
@@ -198,12 +220,13 @@ func main() {
 	getLastID()
 
 	// Регистрируем обработчик для пути "/"
-	http.HandleFunc("/", indexHandler)
-	http.HandleFunc("/files", middleware(uploadHandler))
+	r := gin.Default()
+	// Применяем middleware ко всем маршрутам
+	r.Use(loggingMiddleware())
+	r.GET("/", indexHandler)
+	r.GET("/files", getFile)
+	r.POST("/files", postFile)
+	r.GET("/files/:id", getIdFile)
 
-	// Запускаем веб-сервер на порту 8080
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		fmt.Println("Ошибка запуска сервера:", err)
-	}
+	r.Run(":8080")
 }
