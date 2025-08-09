@@ -10,10 +10,27 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v4"
 )
+
+// Секретный ключ для подписи JWT (в реальном приложении храни в переменной окружения)
+var jwtSecret = []byte("filerestapi")
+
+// Структура для логина
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// Структура для Claims (данные в Payload JWT)
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
 
 type Files struct {
 	Id   int    `json:"Id"`
@@ -68,7 +85,7 @@ func postFile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	file, f_handler, err := c.Request.FormFile("uploadFile")
+	file, f_handler, err := c.Request.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -122,16 +139,66 @@ func getIdFile(c *gin.Context) {
 	})
 }
 
-func middleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		fmt.Fprintf(w, "Путь: %s\n", path)
+func postLogin(c *gin.Context) {
+	var login LoginRequest
+	if err := c.ShouldBindJSON(&login); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Неверный JSON"})
+		return
+	}
+	// Проверка логина и пароля (заглушка, в реальном приложении проверяй в базе данных)
+	if login.Username != "admin" || login.Password != "admin123" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверные учетные данные"})
+		return
+	}
+	// Создаём JWT
+	claims := &Claims{
+		Username: login.Username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // Срок действия 24 часа
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Subject:   login.Username,
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtSecret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ошибка создания токена"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"token": tokenString})
+}
 
-		if path == "/files" {
-			next(w, r)
-		} else {
-			http.NotFound(w, r)
+// Middleware для проверки JWT
+func jwtMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Извлекаем токен из заголовка Authorization
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Токен отсутствует или неверный формат"})
+			c.Abort()
+			return
 		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+		// Парсим и проверяем токен
+		claims := &Claims{}
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("неверный метод подписи")
+			}
+			return jwtSecret, nil
+		})
+
+		if err != nil || !token.Valid {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный или истёкший токен"})
+			c.Abort()
+			return
+		}
+
+		// Сохраняем данные из токена в контексте
+		c.Set("username", claims.Username)
+		c.Next()
 	}
 }
 
@@ -221,12 +288,21 @@ func main() {
 
 	// Регистрируем обработчик для пути "/"
 	r := gin.Default()
+
+	r.GET("/", indexHandler)
+
 	// Применяем middleware ко всем маршрутам
 	r.Use(loggingMiddleware())
-	r.GET("/", indexHandler)
-	r.GET("/files", getFile)
-	r.POST("/files", postFile)
-	r.GET("/files/:id", getIdFile)
+
+	// Эндпоинт для логина (генерация JWT)
+	r.POST("/login", postLogin)
+
+	protected := r.Group("/files")
+	protected.Use(jwtMiddleware())
+
+	protected.GET("/", getFile)
+	protected.POST("/", postFile)
+	protected.GET("/:id", getIdFile)
 
 	r.Run(":8080")
 }

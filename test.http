@@ -1,0 +1,33 @@
+### Главная страница
+GET http://localhost:8080/
+
+### Логинимся админом
+POST http://localhost:8080/login
+Content-Type: application/json
+
+{
+    "username":"admin",
+    "password":"admin123"
+}
+> {%
+    client.global.set("auth_token", response.body.token);
+%}
+### Загрузка файла
+POST http://localhost:8080/files
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+Authorization: Bearer {{auth_token}}
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="123.png"
+Content-Type: text/plain
+
+< C:/Users/Grom/Pictures/123.png
+--WebAppBoundary--
+
+### Просмотр списка файлов
+GET http://localhost:8080/files
+Authorization: Bearer {{auth_token}}
+
+### Просмотр конкретного файла
+GET http://localhost:8080/files/1
+Authorization: Bearer {{auth_token}}
