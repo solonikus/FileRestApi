@@ -1,41 +1,53 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 // Секретный ключ для подписи JWT (в реальном приложении храни в переменной окружения)
-var jwtSecret = []byte("filerestapi")
+const (
+	dbConnStr = "host=localhost port=5432 user=postgres password=yourpassword dbname=file_upload sslmode=disable"
+	jwtSecret = "filerestapi"
+)
 
-// Структура для логина
+// LoginRequest Структура для логина
 type LoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-// Структура для Claims (данные в Payload JWT)
+// Claims Структура для Claims (данные в Payload JWT)
 type Claims struct {
+	UserID   uint   `json:"user_id"`
 	Username string `json:"username"`
 	jwt.RegisteredClaims
 }
 
+type User struct {
+	ID           uint   `gorm:"primaryKey" json:"id"`
+	Username     string `gorm:"unique;not null" json:"username"`
+	PasswordHash string `gorm:"not null" json:"password_hash"`
+}
+
 type Files struct {
-	Id   int    `json:"Id"`
-	Name string `json:"Name"`
-	Size int    `json:"Size"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"not null" json:"name"`
+	Size      int       `gorm:"not null" json:"size"`
+	UserID    uint      `gorm:"not null" json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 var (
@@ -79,97 +91,111 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Загрузка файла
-func postFile(c *gin.Context) {
-	err := c.Request.ParseMultipartForm(10 << 20)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	file, f_handler, err := c.Request.FormFile("file")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer file.Close()
-	out_file, err := os.Create("./upload/" + f_handler.Filename)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer out_file.Close()
-	_, err = io.Copy(out_file, file)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	addFileInDB(Files{db_last_id + 1, f_handler.Filename, int(f_handler.Size)})
-
-	// Возвращаем успешный ответ
-	c.JSON(http.StatusOK, gin.H{
-		"message": "File " + f_handler.Filename + " uploaded successfully!",
-	})
-}
-
-// список файлов
-func getFile(c *gin.Context) {
-	c.JSON(200, db_files)
-}
-
-func getMetaData(id int) string {
-	for _, file := range db_files {
-		if file.Id != id {
-			continue
+func postFile(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		err := c.Request.ParseMultipartForm(10 << 20)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
-		str := "Filename:" + file.Name + "\nSize:" + strconv.Itoa(file.Size) + "bytes"
-		return str
+		file, fHandler, err := c.Request.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer file.Close()
+		outFile, err := os.Create("./upload/" + fHandler.Filename)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer outFile.Close()
+		_, err = io.Copy(outFile, file)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.MustGet("user_id").(uint)
+		fileData := Files{
+			Name:   fHandler.Filename,
+			Size:   int(fHandler.Size),
+			UserID: userID,
+		}
+		if err := db.Create(&fileData).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Ошибка сохранения в БД"})
+			return
+		}
+
+		// Возвращаем успешный ответ
+		c.JSON(http.StatusOK, gin.H{
+			"message": "File " + fHandler.Filename + " uploaded successfully!",
+		})
 	}
-	return "Not found"
+}
+
+// Список файлов
+func getFile(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var files []Files
+		db.Where(&Files{UserID: c.MustGet("user_id").(uint)}).Find(&files)
+		c.JSON(200, files)
+	}
 }
 
 // Данные файла
-func getIdFile(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"ID must be number": err.Error()})
+func getIdFile(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"ID must be number": err.Error()})
+		}
+		var file Files
+		db.Where("id = ?", id).First(&file)
+		c.JSON(http.StatusOK, file)
 	}
-	str := getMetaData(id)
-	c.JSON(http.StatusOK, gin.H{
-		"message": str,
-	})
 }
 
-func postLogin(c *gin.Context) {
-	var login LoginRequest
-	if err := c.ShouldBindJSON(&login); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Неверный JSON"})
-		return
+func postLogin(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var login LoginRequest
+		if err := c.ShouldBindJSON(&login); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Неверный JSON"})
+			return
+		}
+		// Проверка логина и пароля
+		var user User
+		if err := db.Where("username = ?", login.Username).First(&user).Error; err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверные учетные данные1"})
+			return
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(login.Password)); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверные учетные данные2"})
+			return
+		}
+
+		// Создаём JWT
+		claims := &Claims{
+			UserID:   user.ID,
+			Username: user.Username,
+			RegisteredClaims: jwt.RegisteredClaims{
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // Срок действия 24 часа
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+				Subject:   login.Username,
+			},
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		tokenString, err := token.SignedString([]byte(jwtSecret))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Ошибка создания токена"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 	}
-	// Проверка логина и пароля (заглушка, в реальном приложении проверяй в базе данных)
-	if login.Username != "admin" || login.Password != "admin123" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверные учетные данные"})
-		return
-	}
-	// Создаём JWT
-	claims := &Claims{
-		Username: login.Username,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // Срок действия 24 часа
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Subject:   login.Username,
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(jwtSecret)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ошибка создания токена"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"token": tokenString})
 }
 
 // Middleware для проверки JWT
-func jwtMiddleware() gin.HandlerFunc {
+func jwtMiddleware(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Извлекаем токен из заголовка Authorization
 		authHeader := c.GetHeader("Authorization")
@@ -187,7 +213,7 @@ func jwtMiddleware() gin.HandlerFunc {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("неверный метод подписи")
 			}
-			return jwtSecret, nil
+			return []byte(jwtSecret), nil
 		})
 
 		if err != nil || !token.Valid {
@@ -196,8 +222,15 @@ func jwtMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		var user User
+		if err := db.First(&user, claims.UserID).Error; err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Пользователь не найден"})
+			c.Abort()
+			return
+		}
+
 		// Сохраняем данные из токена в контексте
-		c.Set("username", claims.Username)
+		c.Set("user_id", user.ID)
 		c.Next()
 	}
 }
@@ -211,81 +244,22 @@ func loggingMiddleware() gin.HandlerFunc {
 	}
 }
 
-func getDBFiles() {
-	filename, err := ioutil.ReadFile(db_json)
-	if err != nil {
-		fmt.Println(err)
-		os.Create(db_json)
-		return
-	}
-	json.Unmarshal(filename, &db_files)
-}
-
-func checkFilesInFolder() {
-	files, err := os.ReadDir("./upload")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	for _, file := range files {
-		if file.Name() == "db.json" {
-			continue
-		}
-		if !thisFileInDB(file.Name()) {
-			err := os.Remove("./upload/" + file.Name())
-			if err != nil {
-				fmt.Println(err)
-			}
-		}
-	}
-}
-
-func thisFileInDB(filename string) bool {
-	for _, file := range db_files {
-		if file.Name == filename {
-			return true
-		}
-	}
-	return false
-}
-
-func getLastID() {
-	for i := 0; i < len(db_files); i++ {
-		db_last_id = max(db_last_id, db_files[i].Id)
-	}
-}
-
-func checkDeletedFiles() {
-	files, err := os.ReadDir("./upload")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	db_files_copy := make([]Files, 0)
-	copy(db_files_copy, db_files)
-	for i, file := range db_files_copy {
-		if noFileInFolder(file, files) {
-			db_files = slices.Delete(db_files, i, i+1) //потенциальный баг, проверить
-		}
-	}
-}
-
-func noFileInFolder(file_db Files, files []os.DirEntry) bool {
-	for _, file := range files {
-		if file_db.Name == file.Name() {
-			return false
-		}
-	}
-	return true
-}
-
 func main() {
-	//обновляем базу данных файлов в папке
-	getDBFiles()
-	checkFilesInFolder()
-	checkDeletedFiles()
-	getLastID()
-
+	//Работа с DB
+	var db, err = gorm.Open(postgres.Open(dbConnStr), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+	err = db.AutoMigrate(&User{}, &Files{})
+	if err != nil {
+		panic(err)
+	}
+	tables, err := db.Migrator().GetTables()
+	if err != nil {
+		fmt.Println("Ошибка при получении таблиц:", err)
+	} else {
+		fmt.Println("Таблицы в базе:", tables)
+	}
 	// Регистрируем обработчик для пути "/"
 	r := gin.Default()
 
@@ -295,14 +269,14 @@ func main() {
 	r.Use(loggingMiddleware())
 
 	// Эндпоинт для логина (генерация JWT)
-	r.POST("/login", postLogin)
+	r.POST("/login", postLogin(db))
 
 	protected := r.Group("/files")
-	protected.Use(jwtMiddleware())
+	protected.Use(jwtMiddleware(db))
 
-	protected.GET("/", getFile)
-	protected.POST("/", postFile)
-	protected.GET("/:id", getIdFile)
+	protected.GET("/", getFile(db))
+	protected.POST("/", postFile(db))
+	protected.GET("/:id", getIdFile(db))
 
 	r.Run(":8080")
 }
